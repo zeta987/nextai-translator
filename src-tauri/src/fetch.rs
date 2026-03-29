@@ -1,6 +1,6 @@
-use debug_print::debug_println;
 use futures_util::stream::{AbortHandle, Abortable};
 use futures_util::StreamExt;
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
 
 use reqwest::{
@@ -42,10 +42,20 @@ pub(crate) struct AbortEventPayload {
 #[tauri::command]
 #[specta::specta]
 pub async fn fetch_stream(id: String, url: String, options_str: String) -> Result<String, String> {
-    let options: FetchOptions = serde_json::from_str(&options_str).unwrap();
+    let options: FetchOptions = serde_json::from_str(&options_str)
+        .map_err(|e| format!("failed to parse fetch options: {}", e))?;
+
+    info!("fetch_stream: {} {}", options.method, url);
+
     let mut headers = HeaderMap::new();
     for (key, value) in options.headers {
-        headers.insert(key.parse::<HeaderName>().unwrap(), value.parse().unwrap());
+        let header_name = key
+            .parse::<HeaderName>()
+            .map_err(|e| format!("invalid header name '{}': {}", key, e))?;
+        let header_value = value
+            .parse()
+            .map_err(|e| format!("invalid header value for '{}': {}", key, e))?;
+        headers.insert(header_name, header_value);
     }
 
     let mut client_builder = Client::builder().default_headers(headers);
@@ -119,22 +129,26 @@ pub async fn fetch_stream(id: String, url: String, options_str: String) -> Resul
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
     let cloned_id = id.clone();
     let listen_id = app_handle.listen_any("abort-fetch-stream", move |msg| {
-        let payload: AbortEventPayload = serde_json::from_str(&msg.payload()).unwrap();
-        if payload.id == cloned_id {
-            debug_println!("aborting fetch stream: {}", payload.id);
-            abort_handle.abort();
-        } else {
-            debug_println!("ignoring abort event for: {}", payload.id);
+        match serde_json::from_str::<AbortEventPayload>(&msg.payload()) {
+            Ok(payload) => {
+                if payload.id == cloned_id {
+                    debug!("Aborting fetch stream: {}", payload.id);
+                    abort_handle.abort();
+                } else {
+                    debug!("Ignoring abort event for: {}", payload.id);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to parse abort event payload: {:?}", e);
+            }
         }
     });
 
     let mut stream = Abortable::new(stream, abort_registration);
 
     while let Some(item) = stream.next().await {
-        // debug_println!("chunk item: {:#?}", item);
         let chunk = item.map_err(|err| format!("failed to read response chunk: {}", err))?;
         let chunk_str = String::from_utf8_lossy(&chunk);
-        // debug_println!("chunk: {}", chunk_str);
         app_handle
             .emit(
                 "fetch-stream-chunk",
@@ -148,7 +162,7 @@ pub async fn fetch_stream(id: String, url: String, options_str: String) -> Resul
             .unwrap();
     }
 
-    debug_println!("chunk done!");
+    debug!("fetch_stream done: {}", id);
     app_handle
         .emit(
             "fetch-stream-chunk",
