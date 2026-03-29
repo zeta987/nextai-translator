@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use log::{error, info, warn};
+
 use crate::config::get_config;
 use crate::insertion::remember_active_window;
 use crate::ocr::ocr;
@@ -36,7 +38,25 @@ impl PinnedFromWindowEvent {
 pub static TRAY_EVENT_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
-    let config = get_config().unwrap();
+    let config = match get_config() {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Tray: failed to get config, using defaults: {:?}", e);
+            crate::config::Config {
+                hotkey: None,
+                display_window_hotkey: None,
+                ocr_hotkey: None,
+                writing_hotkey: None,
+                writing_newline_hotkey: None,
+                restore_previous_position: None,
+                always_show_icons: None,
+                allow_using_clipboard_when_selected_text_not_available: None,
+                automatic_check_for_updates: None,
+                hide_the_icon_in_the_dock: None,
+                proxy: None,
+            }
+        }
+    };
     let check_for_updates_i = MenuItem::with_id(
         app,
         "check_for_updates",
@@ -57,8 +77,10 @@ pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     if ALWAYS_ON_TOP.load(Ordering::Acquire) {
         pin_i.set_text("Unpin").unwrap();
     }
+    let view_logs_i = MenuItem::with_id(app, "view_logs", "View Logs", true, None::<String>)?;
     let quit_i = PredefinedMenuItem::quit(app, Some("Quit"))?;
     let separator_i = PredefinedMenuItem::separator(app)?;
+    let separator_i2 = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
         app,
         &[
@@ -69,6 +91,8 @@ pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
             &hide_i,
             &pin_i,
             &separator_i,
+            &view_logs_i,
+            &separator_i2,
             &quit_i,
         ],
     )?;
@@ -105,7 +129,35 @@ pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
             let handle = app.app_handle();
             let pinned_from_tray_event = PinnedFromTrayEvent { pinned };
             pinned_from_tray_event.emit(handle).unwrap_or_default();
-            create_tray(app).unwrap();
+            if let Err(e) = create_tray(app) {
+                error!("Failed to recreate tray after pin: {:?}", e);
+            }
+        }
+        "view_logs" => {
+            info!("Opening log directory");
+            if let Ok(log_dir) = app
+                .app_handle()
+                .path()
+                .resolve("", tauri::path::BaseDirectory::AppLog)
+            {
+                let _ = std::fs::create_dir_all(&log_dir);
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("explorer")
+                        .arg(log_dir)
+                        .spawn();
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open").arg(log_dir).spawn();
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(log_dir)
+                        .spawn();
+                }
+            }
         }
         "quit" => app.exit(0),
         _ => {}

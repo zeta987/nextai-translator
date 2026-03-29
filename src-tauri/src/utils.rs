@@ -251,8 +251,8 @@ pub fn get_selected_text_by_clipboard(
 
     thread::sleep(Duration::from_millis(50));
 
-    println!(
-        "get_selected_text_by_clipboard: Invoking copy shortcut to capture selected text (cancel_select={})",
+    log::debug!(
+        "get_selected_text_by_clipboard: invoking copy shortcut (cancel_select={})",
         cancel_select
     );
     copy(enigo);
@@ -376,12 +376,10 @@ fn get_selected_text_frame_by_ax() -> Result<CGRect, Box<dyn std::error::Error>>
 pub fn is_valid_selected_frame() -> Result<bool, Box<dyn std::error::Error>> {
     use crate::windows::get_mouse_location;
     use core_graphics::geometry::{CGPoint, CGSize};
-    use debug_print::debug_println;
-
     match get_selected_text_frame_by_ax() {
         Ok(selected_frame) => {
             if selected_frame.size.width == 0.0 && selected_frame.size.height == 0.0 {
-                debug_println!("Selected frame is empty");
+                log::debug!("Selected frame is empty");
                 return Ok(true);
             }
 
@@ -397,7 +395,7 @@ pub fn is_valid_selected_frame() -> Result<bool, Box<dyn std::error::Error>> {
             let expanded_selected_text_frame = CGRect::new(&origin, &size);
             let (mouse_x, mouse_y) = get_mouse_location()?;
             let mouse_position_point = CGPoint::new(mouse_x as f64, mouse_y as f64);
-            debug_println!(
+            log::debug!(
                 "selected_frame: {:?}, expanded_selected_text_frame: {:?}, mouse_position_point: {:?}",
                 selected_frame,
                 expanded_selected_text_frame,
@@ -406,7 +404,7 @@ pub fn is_valid_selected_frame() -> Result<bool, Box<dyn std::error::Error>> {
             Ok(expanded_selected_text_frame.contains(&mouse_position_point))
         }
         Err(err) => {
-            debug_println!("get_selected_text_frame_by_ax error: {}", err);
+            log::debug!("get_selected_text_frame_by_ax error: {}", err);
             Err(err)
         }
     }

@@ -14,11 +14,11 @@ mod windows;
 mod writing;
 
 use config::get_config;
-use debug_print::debug_println;
 use get_selected_text::get_selected_text;
 use insertion::{
     insert_translation_into_previous_input, remember_active_window, remember_active_window_command,
 };
+use log::{debug, error, info, warn};
 use parking_lot::Mutex;
 use serde_json::json;
 use std::env;
@@ -74,6 +74,113 @@ pub struct UpdateResult {
 
 pub static UPDATE_RESULT: Mutex<Option<Option<UpdateResult>>> = Mutex::new(None);
 
+/// Set up a global panic hook that writes crash details to a file before the
+/// process terminates. This captures panics from ALL threads, not just main.
+fn setup_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>");
+        let message = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+        let location = info
+            .location()
+            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let timestamp = chrono_local_timestamp();
+
+        let crash_report = format!(
+            "=== CRASH REPORT ===\n\
+             Timestamp: {}\n\
+             Thread: {}\n\
+             Location: {}\n\
+             Message: {}\n\
+             \n\
+             Backtrace:\n\
+             {}\n\
+             ===================\n\n",
+            timestamp, thread_name, location, message, backtrace
+        );
+
+        // Write to crash.log synchronously — must complete before process exits
+        if let Some(crash_path) = get_crash_log_path() {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&crash_path)
+            {
+                use std::io::Write;
+                let _ = file.write_all(crash_report.as_bytes());
+                let _ = file.flush();
+            }
+        }
+
+        // Also log via the log crate (if the logger is initialized)
+        error!(
+            "PANIC in thread '{}' at {}: {}",
+            thread_name, location, message
+        );
+
+        // Forward to Aptabase if available
+        if let Some(handle) = APP_HANDLE.get() {
+            let _ = handle.track_event(
+                "panic",
+                Some(json!({
+                    "info": format!("{} ({})", message, location),
+                    "thread": thread_name,
+                })),
+            );
+            handle.flush_events_blocking();
+        }
+
+        // Call the default hook for stderr output
+        default_hook(info);
+    }));
+}
+
+/// Get a local timestamp string without pulling in the `chrono` crate.
+fn chrono_local_timestamp() -> String {
+    use std::time::SystemTime;
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => {
+            let secs = d.as_secs();
+            let millis = d.subsec_millis();
+            format!("{}s+{}ms (unix epoch)", secs, millis)
+        }
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+/// Resolve the crash.log path under the app config directory.
+fn get_crash_log_path() -> Option<std::path::PathBuf> {
+    if let Some(handle) = APP_HANDLE.get() {
+        if let Ok(dir) = handle
+            .path()
+            .resolve("", tauri::path::BaseDirectory::AppLog)
+        {
+            let _ = std::fs::create_dir_all(&dir);
+            return Some(dir.join("crash.log"));
+        }
+    }
+    // Fallback: try standard AppData path on Windows
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let dir =
+                std::path::PathBuf::from(appdata).join("xyz.yetone.apps.openai-translator");
+            let _ = std::fs::create_dir_all(&dir);
+            return Some(dir.join("crash.log"));
+        }
+    }
+    None
+}
+
 fn init_tokio_runtime() -> &'static TokioRuntime {
     use std::sync::OnceLock;
 
@@ -111,9 +218,9 @@ fn get_update_result() -> (bool, Option<UpdateResult>) {
 fn query_accessibility_permissions() -> bool {
     let trusted = macos_accessibility_client::accessibility::application_is_trusted_with_prompt();
     if trusted {
-        print!("Application is totally trusted!");
+        info!("Application is totally trusted!");
     } else {
-        print!("Application isn't trusted :(");
+        warn!("Application isn't trusted for accessibility");
     }
     trusted
 }
@@ -127,14 +234,21 @@ fn query_accessibility_permissions() -> bool {
 fn launch_ipc_server(server: &Server) {
     for mut req in server.incoming_requests() {
         let mut selected_text = String::new();
-        req.as_reader().read_to_string(&mut selected_text).unwrap();
+        if let Err(e) = req.as_reader().read_to_string(&mut selected_text) {
+            error!("IPC server: failed to read request body: {:?}", e);
+            continue;
+        }
         utils::send_text(selected_text);
         remember_active_window();
         let window = windows::show_translator_window(false, true, false);
-        window.set_focus().unwrap();
+        if let Err(e) = window.set_focus() {
+            warn!("IPC server: failed to set window focus: {:?}", e);
+        }
         utils::show();
         let response = HttpResponse::from_string("ok");
-        req.respond(response).unwrap();
+        if let Err(e) = req.respond(response) {
+            warn!("IPC server: failed to send response: {:?}", e);
+        }
     }
 }
 
@@ -146,7 +260,7 @@ fn bind_mouse_hook() {
     // Mouse event hook requires `sudo` permission on linux.
     // Let's just skip it.
     if cfg!(target_os = "linux") {
-        println!("mouse event hook skipped in linux!");
+        info!("Mouse event hook skipped on Linux");
         return;
     }
 
@@ -155,7 +269,13 @@ fn bind_mouse_hook() {
     let hook_result = mouse_manager.hook(Box::new(|event| {
         match event {
             mouce::common::MouseEvent::Press(mouce::common::MouseButton::Left) => {
-                let config = config::get_config().unwrap();
+                let config = match config::get_config() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!("Mouse press: failed to get config: {:?}", e);
+                        return;
+                    }
+                };
                 let always_show_icons = config.always_show_icons.unwrap_or(true);
                 if !always_show_icons {
                     return;
@@ -167,7 +287,13 @@ fn bind_mouse_hook() {
                 *PREVIOUS_PRESS_TIME.lock() = current_press_time;
             }
             mouce::common::MouseEvent::Release(mouce::common::MouseButton::Left) => {
-                let config = config::get_config().unwrap();
+                let config = match config::get_config() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!("Mouse release: failed to get config: {:?}", e);
+                        return;
+                    }
+                };
                 let always_show_icons = config.always_show_icons.unwrap_or(true);
                 if !always_show_icons {
                     windows::delete_thumb();
@@ -178,7 +304,13 @@ fn bind_mouse_hook() {
                     .unwrap()
                     .as_millis();
                 let mut is_text_selected_event = false;
-                let (x, y): (i32, i32) = windows::get_mouse_location().unwrap();
+                let (x, y): (i32, i32) = match windows::get_mouse_location() {
+                    Ok(pos) => pos,
+                    Err(e) => {
+                        warn!("Mouse release: failed to get mouse location: {:?}", e);
+                        return;
+                    }
+                };
                 let (prev_release_x, prev_release_y) = { *PREVIOUS_RELEASE_POSITION.lock() };
                 {
                     *PREVIOUS_RELEASE_POSITION.lock() = (x, y);
@@ -243,7 +375,7 @@ fn bind_mouse_hook() {
                                 }
                             }
                             Err(err) => {
-                                println!("err: {:?}", err);
+                                debug!("Thumb window position error: {:?}", err);
                                 false
                             }
                         },
@@ -251,16 +383,8 @@ fn bind_mouse_hook() {
                     },
                     None => false,
                 };
-                // debug_println!("is_text_selected_event: {}", is_text_selected_event);
-                // debug_println!("is_click_on_thumb: {}", is_click_on_thumb);
                 if !is_text_selected_event && !is_click_on_thumb {
                     windows::close_thumb();
-                    // println!("not text selected event");
-                    // println!("is_click_on_thumb: {}", is_click_on_thumb);
-                    // println!("mouse_distance: {}", mouse_distance);
-                    // println!("pressed_time: {}", pressed_time);
-                    // println!("released_time: {}", current_release_time - previous_release_time);
-                    // println!("is_double_click: {}", is_double_click);
                     return;
                 }
 
@@ -272,7 +396,7 @@ fn bind_mouse_hook() {
                         #[cfg(target_os = "macos")]
                         {
                             if !utils::is_valid_selected_frame().unwrap_or(false) {
-                                debug_println!("No valid selected frame");
+                                debug!("No valid selected frame");
                                 windows::close_thumb();
                                 return;
                             }
@@ -296,7 +420,9 @@ fn bind_mouse_hook() {
                         remember_active_window();
                         let window = windows::show_translator_window(false, true, false);
                         utils::send_text(selected_text);
-                        window.set_focus().unwrap();
+                        if let Err(e) = window.set_focus() {
+                            warn!("Failed to set translator window focus: {:?}", e);
+                        }
                     }
                 }
             }
@@ -306,15 +432,16 @@ fn bind_mouse_hook() {
 
     match hook_result {
         Ok(_) => {
-            println!("mouse event Hooked!");
+            info!("Mouse event hook installed successfully");
         }
         Err(e) => {
-            println!("Error: {}", e);
+            error!("Failed to install mouse event hook: {}", e);
         }
     }
 }
 
 fn main() {
+    setup_panic_hook();
     let _ = init_tokio_runtime();
     let silently = env::args().any(|arg| arg == "--silently");
 
@@ -372,20 +499,23 @@ fn main() {
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut app = tauri::Builder::default()
         .plugin(
-            tauri_plugin_aptabase::Builder::new("A-US-9856842764")
-                .with_panic_hook(Box::new(|client, info, msg| {
-                    let location = info
-                        .location()
-                        .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
-                        .unwrap_or_else(|| "".to_string());
-
-                    let _ = client.track_event(
-                        "panic",
-                        Some(json!({
-                            "info": format!("{} ({})", msg, location),
-                        })),
-                    );
-                }))
+            tauri_plugin_aptabase::Builder::new("A-US-9856842764").build(),
+        )
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("app".into()),
+                    }),
+                ])
+                .max_file_size(5_000_000) // 5MB rotation
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
                 .build(),
         )
         .plugin(tauri_plugin_http::init())
@@ -393,7 +523,12 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
-            println!("{}, {argv:?}, {cwd}", app.package_info().name);
+            info!(
+                "Single instance detected: {}, argv={:?}, cwd={}",
+                app.package_info().name,
+                argv,
+                cwd
+            );
             app.notification()
                 .builder()
                 .title("This app is already running!")
@@ -407,6 +542,7 @@ fn main() {
         ))
         .plugin(tauri_plugin_process::init())
         .setup(move |app| {
+            info!("App setup started");
             specta_builder_setup.mount_events(app);
             let app_handle = app.handle();
             APP_HANDLE.get_or_init(|| app.handle().clone());
@@ -419,7 +555,7 @@ fn main() {
                 // create translator window
                 let _ = get_translator_window(false, false, false);
                 windows::do_hide_translator_window();
-                debug_println!("translator window is hidden");
+                debug!("Translator window created (hidden, silently mode)");
             } else {
                 let window = get_translator_window(false, false, false);
                 window.set_focus().unwrap();
@@ -438,18 +574,37 @@ fn main() {
                     .unwrap();
             }
             std::thread::spawn(move || {
-                #[cfg(target_os = "windows")]
-                {
-                    let server = Server::http("127.0.0.1:62007").unwrap();
-                    launch_ipc_server(&server);
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    use std::path::Path;
-                    let path = Path::new("/tmp/openai-translator.sock");
-                    std::fs::remove_file(path).unwrap_or_default();
-                    let server = Server::http_unix(path).unwrap();
-                    launch_ipc_server(&server);
+                let result = std::panic::catch_unwind(|| {
+                    #[cfg(target_os = "windows")]
+                    {
+                        match Server::http("127.0.0.1:62007") {
+                            Ok(server) => {
+                                info!("IPC server listening on 127.0.0.1:62007");
+                                launch_ipc_server(&server);
+                            }
+                            Err(e) => {
+                                error!("Failed to bind IPC server on port 62007: {:?}", e);
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        use std::path::Path;
+                        let path = Path::new("/tmp/openai-translator.sock");
+                        std::fs::remove_file(path).unwrap_or_default();
+                        match Server::http_unix(path) {
+                            Ok(server) => {
+                                info!("IPC server listening on /tmp/openai-translator.sock");
+                                launch_ipc_server(&server);
+                            }
+                            Err(e) => {
+                                error!("Failed to bind IPC unix socket: {:?}", e);
+                            }
+                        }
+                    }
+                });
+                if let Err(e) = result {
+                    error!("IPC server thread panicked: {:?}", e);
                 }
             });
 
@@ -457,29 +612,43 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(60 * 10));
+                    info!("Running periodic update check");
                     let builder = handle.updater_builder();
-                    let updater = builder.build().unwrap();
+                    let updater = match builder.build() {
+                        Ok(u) => u,
+                        Err(e) => {
+                            error!("Failed to build updater: {:?}", e);
+                            continue;
+                        }
+                    };
 
                     match updater.check().await {
                         Ok(Some(update)) => {
+                            info!("Update available: v{}", update.version);
                             *UPDATE_RESULT.lock() = Some(Some(UpdateResult {
                                 version: update.version,
                                 current_version: update.current_version,
                                 body: update.body,
                             }));
-                            tray::create_tray(&handle).unwrap();
+                            if let Err(e) = tray::create_tray(&handle) {
+                                error!("Failed to update tray after update check: {:?}", e);
+                            }
                         }
                         Ok(None) => {
                             if UPDATE_RESULT.lock().is_some() {
                                 if let Some(Some(_)) = *UPDATE_RESULT.lock() {
                                     *UPDATE_RESULT.lock() = Some(None);
-                                    tray::create_tray(&handle).unwrap();
+                                    if let Err(e) = tray::create_tray(&handle) {
+                                        error!("Failed to update tray: {:?}", e);
+                                    }
                                 }
                             } else {
                                 *UPDATE_RESULT.lock() = Some(None);
                             }
                         }
-                        Err(_) => {}
+                        Err(e) => {
+                            warn!("Periodic update check failed: {:?}", e);
+                        }
                     }
                 }
             });
@@ -487,14 +656,19 @@ fn main() {
             PinnedFromWindowEvent::listen_any(app_handle, move |event| {
                 let pinned = event.payload.pinned();
                 ALWAYS_ON_TOP.store(*pinned, Ordering::Release);
-                tray::create_tray(&handle).unwrap();
+                if let Err(e) = tray::create_tray(&handle) {
+                    error!("Failed to update tray on pin event: {:?}", e);
+                }
             });
 
             let handle = app_handle.clone();
             ConfigUpdatedEvent::listen_any(app_handle, move |_event| {
                 clear_config_cache();
-                tray::create_tray(&handle).unwrap();
+                if let Err(e) = tray::create_tray(&handle) {
+                    error!("Failed to update tray on config change: {:?}", e);
+                }
             });
+            info!("App setup completed");
             Ok(())
         })
         .invoke_handler(invoke_handler)
@@ -513,26 +687,44 @@ fn main() {
 
     app.run(|app, event| match event {
         tauri::RunEvent::Exit { .. } => {
+            info!("App exiting");
             let _ = app.track_event("app_exited", None);
             app.flush_events_blocking();
         }
         tauri::RunEvent::Ready => {
+            info!("App ready");
             let _ = app.track_event("app_started", None);
             bind_mouse_hook();
             let handle = app.clone();
             tauri::async_runtime::spawn(async move {
+                info!("Running initial update check");
                 let builder = handle.updater_builder();
-                let updater = builder.build().unwrap();
+                let updater = match builder.build() {
+                    Ok(u) => u,
+                    Err(e) => {
+                        error!("Failed to build updater on ready: {:?}", e);
+                        return;
+                    }
+                };
 
                 match updater.check().await {
                     Ok(Some(update)) => {
+                        info!("Update available on startup: v{}", update.version);
                         *UPDATE_RESULT.lock() = Some(Some(UpdateResult {
                             version: update.version,
                             current_version: update.current_version,
                             body: update.body,
                         }));
-                        tray::create_tray(&handle).unwrap();
-                        let config = get_config().unwrap();
+                        if let Err(e) = tray::create_tray(&handle) {
+                            error!("Failed to update tray on startup: {:?}", e);
+                        }
+                        let config = match get_config() {
+                            Ok(c) => c,
+                            Err(e) => {
+                                warn!("Failed to get config for update check: {:?}", e);
+                                return;
+                            }
+                        };
                         if config.automatic_check_for_updates.is_none()
                             || config
                                 .automatic_check_for_updates
@@ -546,13 +738,17 @@ fn main() {
                         if UPDATE_RESULT.lock().is_some() {
                             if let Some(Some(_)) = *UPDATE_RESULT.lock() {
                                 *UPDATE_RESULT.lock() = Some(None);
-                                tray::create_tray(&handle).unwrap();
+                                if let Err(e) = tray::create_tray(&handle) {
+                                    error!("Failed to update tray on startup: {:?}", e);
+                                }
                             }
                         } else {
                             *UPDATE_RESULT.lock() = Some(None);
                         }
                     }
-                    Err(_) => {}
+                    Err(e) => {
+                        warn!("Initial update check failed: {:?}", e);
+                    }
                 }
             });
         }

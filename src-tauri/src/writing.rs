@@ -1,6 +1,6 @@
 use crate::utils::{backspace_click, left_arrow_click, right_arrow_click, select_all, INPUT_LOCK};
 use crate::APP_HANDLE;
-use debug_print::debug_println;
+use log::debug;
 use enigo::*;
 use parking_lot::Mutex;
 use similar::utils::diff_chars;
@@ -64,7 +64,7 @@ impl Drop for WritingGuard {
 #[tauri::command]
 #[specta::specta]
 pub fn writing_command() {
-    debug_println!("[writing] trigger");
+    debug!("[writing] trigger");
     let mut writing_guard = match WritingGuard::new() {
         Some(guard) => guard,
         None => return,
@@ -105,13 +105,13 @@ pub fn writing_command() {
         *previous_translated_text = content;
         return;
     }
-    debug_println!("[writing] content: {:?}", content.chars());
-    debug_println!(
+    debug!("[writing] content: {:?}", content.chars());
+    debug!(
         "[writing] previous_translated_text: {:?}",
         previous_translated_text.chars()
     );
     let changeset = diff_chars(Algorithm::Myers, &*previous_translated_text, &content);
-    debug_println!("[writing] changeset: {:?}", changeset);
+    debug!("[writing] changeset: {:?}", changeset);
     let modifications_count = changeset
         .iter()
         .filter(|(change_tag, _)| match change_tag {
@@ -160,7 +160,7 @@ pub fn writing_command() {
         }
     }
 
-    debug_println!("is_all_translated_before: {:?}", is_all_translated_before);
+    debug!("is_all_translated_before: {:?}", is_all_translated_before);
     if !previous_translated_text.is_empty()
         && modifications_count > 0
         && modifications_count < 10

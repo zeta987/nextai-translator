@@ -1,3 +1,4 @@
+use log::warn;
 use parking_lot::Mutex;
 use tauri::Manager;
 use tauri::{path::BaseDirectory, AppHandle};
@@ -60,7 +61,7 @@ pub fn get_config_by_app(app: &AppHandle) -> Result<Config, Box<dyn std::error::
     match conf {
         Ok(conf) => Ok(conf),
         Err(e) => {
-            println!("get config failed: {}", e);
+            warn!("get config failed: {}", e);
             Err(e)
         }
     }

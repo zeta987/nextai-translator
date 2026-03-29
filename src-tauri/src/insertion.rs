@@ -2,7 +2,7 @@ use std::thread;
 use std::time::Duration;
 
 use active_win_pos_rs::{get_active_window, ActiveWindow};
-use debug_print::debug_println;
+use log::debug;
 use enigo::{Enigo, Keyboard, Settings};
 use parking_lot::Mutex;
 
@@ -17,16 +17,16 @@ fn is_translator_process(window: &ActiveWindow) -> bool {
 pub fn remember_active_window() {
     if let Ok(window) = get_active_window() {
         if !is_translator_process(&window) {
-            debug_println!(
+            debug!(
                 "[insertion] remembered window: {}",
                 describe_window(&window)
             );
             *PREVIOUS_ACTIVE_WINDOW.lock() = Some(window);
         } else {
-            debug_println!("[insertion] active window is translator, skipping");
+            debug!("[insertion] active window is translator, skipping");
         }
     } else {
-        debug_println!("[insertion] failed to fetch active window");
+        debug!("[insertion] failed to fetch active window");
     }
 }
 
@@ -65,19 +65,19 @@ fn focus_window(window: &ActiveWindow) -> Result<(), String> {
                 }
             };
             if activated {
-                debug_println!(
+                debug!(
                     "[insertion] activated app via NSRunningApplication: {}",
                     window.app_name
                 );
                 return Ok(());
             } else {
-                debug_println!(
+                debug!(
                     "[insertion] NSRunningApplication activation returned false for {}",
                     window.app_name
                 );
             }
         } else {
-            debug_println!(
+            debug!(
                 "[insertion] NSRunningApplication not found for pid {} ({})",
                 window.process_id,
                 window.app_name
@@ -98,7 +98,7 @@ fn focus_window(window: &ActiveWindow) -> Result<(), String> {
         .status()
         .map_err(|e| e.to_string())?;
     if status.success() {
-        debug_println!(
+        debug!(
             "[insertion] activated app via AppleScript: {}",
             window.app_name
         );
@@ -213,18 +213,18 @@ fn focus_window(window: &ActiveWindow) -> Result<(), String> {
 
 fn focus_previous_window() -> Result<(), String> {
     if let Some(window) = PREVIOUS_ACTIVE_WINDOW.lock().clone() {
-        debug_println!(
+        debug!(
             "[insertion] focusing previous window: {}",
             describe_window(&window)
         );
         let result = focus_window(&window);
         if let Err(ref err) = result {
-            debug_println!("[insertion] failed to focus window: {}", err);
+            debug!("[insertion] failed to focus window: {}", err);
             let _ = err;
         }
         result
     } else {
-        debug_println!("[insertion] no previous window recorded");
+        debug!("[insertion] no previous window recorded");
         Err("no previous window recorded".to_string())
     }
 }
@@ -250,7 +250,7 @@ pub async fn insert_translation_into_previous_input(text: String) -> Result<(), 
     focus_previous_window()?;
     thread::sleep(Duration::from_millis(200));
     replace_input_with_text(&text)?;
-    debug_println!("[insertion] inserted translation ({} chars)", text.len());
+    debug!("[insertion] inserted translation ({} chars)", text.len());
     Ok(())
 }
 
@@ -260,7 +260,7 @@ pub fn remember_active_window_command() -> bool {
     let before = PREVIOUS_ACTIVE_WINDOW.lock().clone();
     remember_active_window();
     let has_window = PREVIOUS_ACTIVE_WINDOW.lock().is_some() || before.is_some();
-    debug_println!(
+    debug!(
         "[insertion] remember_active_window_command called, has_window={}",
         has_window
     );

@@ -1,6 +1,6 @@
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::insertion::remember_active_window;
-use debug_print::debug_println;
+use log::{debug, error};
 #[cfg(target_os = "windows")]
 use std::path::Path;
 use tauri::path::BaseDirectory;
@@ -13,7 +13,7 @@ pub fn cut_image(left: u32, top: u32, width: u32, height: u32) {
     let app_handle = match crate::APP_HANDLE.get() {
         Some(handle) => handle,
         None => {
-            eprintln!("APP_HANDLE not initialized");
+            error!("cut_image: APP_HANDLE not initialized");
             return;
         }
     };
@@ -23,7 +23,7 @@ pub fn cut_image(left: u32, top: u32, width: u32, height: u32) {
     {
         Ok(dir) => dir,
         Err(e) => {
-            eprintln!("Failed to resolve ocr_images directory: {:?}", e);
+            error!("cut_image: failed to resolve ocr_images directory: {:?}", e);
             return;
         }
     };
@@ -34,7 +34,7 @@ pub fn cut_image(left: u32, top: u32, width: u32, height: u32) {
     let mut img = match image::open(&image_file_path) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("error: {}", e);
+            error!("cut_image: failed to open image: {}", e);
             return;
         }
     };
@@ -43,7 +43,7 @@ pub fn cut_image(left: u32, top: u32, width: u32, height: u32) {
     match img2.to_image().save(&new_image_file_path) {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("{:?}", e.to_string());
+            error!("cut_image: failed to save cut image: {:?}", e);
             return;
         }
     }
@@ -58,7 +58,7 @@ pub fn screenshot(x: i32, y: i32) {
     let screens = match Screen::all() {
         Ok(screens) => screens,
         Err(e) => {
-            eprintln!("Failed to get screens: {:?}", e);
+            error!("screenshot: failed to get screens: {:?}", e);
             return;
         }
     };
@@ -68,7 +68,7 @@ pub fn screenshot(x: i32, y: i32) {
             let app_handle = match crate::APP_HANDLE.get() {
                 Some(handle) => handle,
                 None => {
-                    eprintln!("APP_HANDLE not initialized");
+                    error!("screenshot: APP_HANDLE not initialized");
                     return;
                 }
             };
@@ -78,13 +78,13 @@ pub fn screenshot(x: i32, y: i32) {
             {
                 Ok(dir) => dir,
                 Err(e) => {
-                    eprintln!("Failed to resolve ocr_images directory: {:?}", e);
+                    error!("screenshot: failed to resolve ocr_images directory: {:?}", e);
                     return;
                 }
             };
             if !image_dir.exists() {
                 if let Err(e) = std::fs::create_dir_all(&image_dir) {
-                    eprintln!("Failed to create ocr_images directory: {:?}", e);
+                    error!("screenshot: failed to create ocr_images directory: {:?}", e);
                     return;
                 }
             }
@@ -92,20 +92,20 @@ pub fn screenshot(x: i32, y: i32) {
             let image = match screen.capture() {
                 Ok(img) => img,
                 Err(e) => {
-                    eprintln!("Failed to capture screen: {:?}", e);
+                    error!("screenshot: failed to capture screen: {:?}", e);
                     return;
                 }
             };
             let buffer = match image.to_png(Compression::Fast) {
                 Ok(buf) => buf,
                 Err(e) => {
-                    eprintln!("Failed to convert image to PNG: {:?}", e);
+                    error!("screenshot: failed to convert image to PNG: {:?}", e);
                     return;
                 }
             };
-            debug_println!("image_file_path: {:?}", image_file_path);
+            debug!("screenshot: image_file_path: {:?}", image_file_path);
             if let Err(e) = fs::write(&image_file_path, buffer) {
-                eprintln!("Failed to write screenshot file: {:?}", e);
+                error!("screenshot: failed to write file: {:?}", e);
                 return;
             }
             break;
@@ -133,46 +133,109 @@ pub fn do_ocr_with_cut_file_path(image_file_path: &Path) {
     use windows::Storage::{FileAccessMode, StorageFile};
 
     let path = image_file_path.to_string_lossy().replace("\\\\?\\", "");
-    debug_println!("ocr image file path: {:?}", path);
+    debug!("OCR image file path: {:?}", path);
 
-    let file = StorageFile::GetFileFromPathAsync(&HSTRING::from(path))
-        .unwrap()
-        .get()
-        .unwrap();
+    let file = match StorageFile::GetFileFromPathAsync(&HSTRING::from(path)) {
+        Ok(op) => match op.get() {
+            Ok(f) => f,
+            Err(e) => {
+                error!("OCR: failed to get storage file: {:?}", e);
+                return;
+            }
+        },
+        Err(e) => {
+            error!("OCR: GetFileFromPathAsync failed: {:?}", e);
+            return;
+        }
+    };
 
-    let bitmap = BitmapDecoder::CreateWithIdAsync(
-        BitmapDecoder::PngDecoderId().unwrap(),
-        &file.OpenAsync(FileAccessMode::Read).unwrap().get().unwrap(),
-    )
-    .unwrap()
-    .get()
-    .unwrap();
+    let stream = match file.OpenAsync(FileAccessMode::Read) {
+        Ok(op) => match op.get() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("OCR: failed to open file stream: {:?}", e);
+                return;
+            }
+        },
+        Err(e) => {
+            error!("OCR: OpenAsync failed: {:?}", e);
+            return;
+        }
+    };
 
-    let bitmap = bitmap.GetSoftwareBitmapAsync().unwrap().get().unwrap();
+    let decoder_id = match BitmapDecoder::PngDecoderId() {
+        Ok(id) => id,
+        Err(e) => {
+            error!("OCR: failed to get PNG decoder ID: {:?}", e);
+            return;
+        }
+    };
+
+    let bitmap = match BitmapDecoder::CreateWithIdAsync(decoder_id, &stream) {
+        Ok(op) => match op.get() {
+            Ok(d) => d,
+            Err(e) => {
+                error!("OCR: failed to create bitmap decoder: {:?}", e);
+                return;
+            }
+        },
+        Err(e) => {
+            error!("OCR: CreateWithIdAsync failed: {:?}", e);
+            return;
+        }
+    };
+
+    let bitmap = match bitmap.GetSoftwareBitmapAsync() {
+        Ok(op) => match op.get() {
+            Ok(b) => b,
+            Err(e) => {
+                error!("OCR: failed to get software bitmap: {:?}", e);
+                return;
+            }
+        },
+        Err(e) => {
+            error!("OCR: GetSoftwareBitmapAsync failed: {:?}", e);
+            return;
+        }
+    };
 
     let engine = OcrEngine::TryCreateFromUserProfileLanguages();
 
     match engine {
         Ok(engine) => {
-            let result = engine.RecognizeAsync(&bitmap).unwrap().get().unwrap();
+            let result = match engine.RecognizeAsync(&bitmap) {
+                Ok(op) => match op.get() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        error!("OCR: RecognizeAsync get failed: {:?}", e);
+                        return;
+                    }
+                },
+                Err(e) => {
+                    error!("OCR: RecognizeAsync failed: {:?}", e);
+                    return;
+                }
+            };
 
             let mut content = String::new();
-            for line in result.Lines().unwrap() {
-                content.push_str(&line.Text().unwrap().to_string_lossy().trim());
-                content.push('\n');
+            if let Ok(lines) = result.Lines() {
+                for line in lines {
+                    if let Ok(text) = line.Text() {
+                        content.push_str(&text.to_string_lossy().trim());
+                        content.push('\n');
+                    }
+                }
             }
 
-            debug_println!("ocr content: {:?}", content);
+            debug!("OCR content: {:?}", content);
             crate::utils::send_text(content);
             remember_active_window();
             crate::windows::show_translator_window(false, true, true);
         }
         Err(e) => {
-            debug_println!("ocr error: {:?}", e);
+            error!("OCR engine creation failed: {:?}", e);
             if e.to_string().contains("0x00000000") {
-                eprintln!("{}", "Language package not installed!\n\nSee: https://learn.microsoft.com/zh-cn/windows/powertoys/text-extractor#supported-languages".to_string());
-            } else {
-                eprintln!("{}", e.to_string());
+                error!("Language package not installed! See: https://learn.microsoft.com/zh-cn/windows/powertoys/text-extractor#supported-languages");
             }
         }
     }
@@ -239,7 +302,7 @@ pub fn start_ocr() {
 
 pub fn ocr() {
     if let Err(e) = do_ocr() {
-        eprintln!("OCR failed: {:?}", e);
+        error!("OCR failed: {:?}", e);
     }
 }
 
@@ -254,7 +317,7 @@ fn do_finish_ocr() {
     let app_handle = match crate::APP_HANDLE.get() {
         Some(handle) => handle,
         None => {
-            eprintln!("APP_HANDLE not initialized");
+            error!("finish_ocr: APP_HANDLE not initialized");
             return;
         }
     };
@@ -264,7 +327,7 @@ fn do_finish_ocr() {
     {
         Ok(dir) => dir,
         Err(e) => {
-            eprintln!("Failed to resolve ocr_images directory: {:?}", e);
+            error!("finish_ocr: failed to resolve ocr_images directory: {:?}", e);
             return;
         }
     };

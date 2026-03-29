@@ -7,7 +7,7 @@ use crate::APP_HANDLE;
 use active_win_pos_rs::get_active_window;
 #[cfg(target_os = "macos")]
 use cocoa::appkit::NSWindow;
-use debug_print::debug_println;
+use log::{debug, error, info, warn};
 use enigo::*;
 use get_selected_text::get_selected_text;
 use mouse_position::mouse_position::Mouse;
@@ -32,11 +32,11 @@ fn get_dummy_window() -> tauri::WebviewWindow {
     let app_handle = APP_HANDLE.get().unwrap();
     match app_handle.get_webview_window("dummy") {
         Some(window) => {
-            debug_println!("Dummy window found!");
+            debug!("Dummy window found!");
             window
         }
         None => {
-            debug_println!("Create dummy window!");
+            debug!("Create dummy window!");
             tauri::WebviewWindowBuilder::new(
                 app_handle,
                 "dummy",
@@ -78,7 +78,7 @@ pub fn get_current_monitor() -> tauri::Monitor {
                 .cloned()
         })
         .unwrap_or_else(|e| {
-            eprintln!("Error get available monitors: {}", e);
+            warn!("Error get available monitors: {}", e);
             None
         })
         .or_else(|| window.current_monitor().unwrap())
@@ -131,7 +131,7 @@ pub async fn show_translator_window_with_selected_text_command() {
         match get_selected_text() {
             Ok(text) => text,
             Err(e) => {
-                eprintln!("Error getting selected text natively: {}", e);
+                warn!("Error getting selected text natively: {}", e);
                 String::new()
             }
         }
@@ -223,13 +223,13 @@ pub fn get_thumb_window(x: i32, y: i32) -> tauri::WebviewWindow {
     let position_offset = 7.0 as f64;
     let window = match handle.get_webview_window(THUMB_WIN_NAME) {
         Some(window) => {
-            debug_println!("Thumb window already exists");
+            debug!("Thumb window already exists");
             window.unminimize().unwrap();
             window.set_always_on_top(true).unwrap();
             window
         }
         None => {
-            debug_println!("Thumb window does not exist");
+            debug!("Thumb window does not exist");
             #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
             let mut builder = tauri::WebviewWindowBuilder::new(
                 handle,
@@ -415,28 +415,28 @@ fn position_translator_window_to_cursor(window: &tauri::WebviewWindow) {
     }
 
     if let Err(e) = window.set_position(window_physical_position) {
-        eprintln!("Error setting translator window position: {}", e);
+        warn!("Error setting translator window position: {}", e);
     }
 }
 
 fn focus_translator_window(window: &tauri::WebviewWindow) {
     if let Err(e) = window.unminimize() {
-        eprintln!("Error unminimizing translator window: {}", e);
+        warn!("Error unminimizing translator window: {}", e);
     }
 
     if let Err(e) = window.set_focus() {
-        eprintln!("Error focusing translator window: {}", e);
+        warn!("Error focusing translator window: {}", e);
     }
 
     let should_restore_on_top = !ALWAYS_ON_TOP.load(Ordering::Acquire);
     if let Err(e) = window.set_always_on_top(true) {
-        eprintln!("Error enabling always on top for translator window: {}", e);
+        warn!("Error enabling always on top for translator window: {}", e);
         return;
     }
 
     if should_restore_on_top {
         if let Err(e) = window.set_always_on_top(false) {
-            eprintln!(
+            warn!(
                 "Error disabling temporary always on top for translator window: {}",
                 e
             );
@@ -483,18 +483,18 @@ pub fn get_translator_window(
     let restore_previous_position = match config::get_config() {
         Ok(config) => config.restore_previous_position.unwrap_or(false),
         Err(e) => {
-            eprintln!("Error getting config: {}", e);
+            warn!("Error getting config: {}", e);
             false
         }
     };
 
     if restore_previous_position {
-        debug_println!("Restoring previous position");
+        debug!("Restoring previous position");
         if !cfg!(target_os = "macos") {
             window.unminimize().unwrap();
         }
     } else if to_mouse_position {
-        debug_println!("Setting position to mouse position");
+        debug!("Setting position to mouse position");
         let (mouse_logical_x, mouse_logical_y): (i32, i32) = get_mouse_location().unwrap();
         let window_physical_size = window.outer_size().unwrap();
         let scale_factor = window.scale_factor().unwrap_or(1.0);
@@ -526,11 +526,11 @@ pub fn get_translator_window(
         if !cfg!(target_os = "macos") {
             window.unminimize().unwrap();
         }
-        debug_println!("Mouse physical position: {:?}", mouse_physical_position);
-        debug_println!("Monitor physical size: {:?}", monitor_physical_size);
-        debug_println!("Monitor physical position: {:?}", monitor_physical_position);
-        debug_println!("Window physical size: {:?}", window_physical_size);
-        debug_println!("Window physical position: {:?}", window_physical_position);
+        debug!("Mouse physical position: {:?}", mouse_physical_position);
+        debug!("Monitor physical size: {:?}", monitor_physical_size);
+        debug!("Monitor physical position: {:?}", monitor_physical_position);
+        debug!("Window physical size: {:?}", window_physical_size);
+        debug!("Window physical position: {:?}", window_physical_position);
         window.set_position(window_physical_position).unwrap();
     } else if center {
         if !cfg!(target_os = "macos") {
