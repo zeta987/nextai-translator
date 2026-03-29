@@ -7,7 +7,7 @@ use crate::APP_HANDLE;
 use active_win_pos_rs::get_active_window;
 #[cfg(target_os = "macos")]
 use cocoa::appkit::NSWindow;
-use log::{debug, error, info, warn};
+use log::{debug, warn};
 use enigo::*;
 use get_selected_text::get_selected_text;
 use mouse_position::mouse_position::Mouse;

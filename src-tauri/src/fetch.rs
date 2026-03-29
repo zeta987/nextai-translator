@@ -1,6 +1,6 @@
 use futures_util::stream::{AbortHandle, Abortable};
 use futures_util::StreamExt;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use std::collections::HashMap;
 
 use reqwest::{
