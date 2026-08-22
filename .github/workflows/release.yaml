@@ -29,10 +29,14 @@ jobs:
 
       - name: Get tag message
         id: tag
+        # contents:subject/body exclude the SSH/GPG signature block that
+        # %(contents) would leak into the release notes on signed tags.
         run: |
           git fetch --depth=1 origin +refs/tags/*:refs/tags/*
           echo "message<<EOF" >> $GITHUB_OUTPUT
-          echo "$(git tag -l --format='%(contents)' ${GITHUB_REF_NAME})" >> $GITHUB_OUTPUT
+          echo "$(git tag -l --format='%(contents:subject)' ${GITHUB_REF_NAME})" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "$(git tag -l --format='%(contents:body)' ${GITHUB_REF_NAME})" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create Release
