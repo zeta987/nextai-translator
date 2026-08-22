@@ -18,8 +18,12 @@
 
 ## 發版流程
 
-前置（一次性）：執行 `bash scripts/setup-updater-signing.sh` 產生簽章金鑰、
-寫入 GitHub secrets、把公鑰 patch 進 `tauri.conf.json`（記得 commit）。
+前置（一次性）：執行簽章設置 wizard 產生金鑰、寫入 GitHub secrets、
+把公鑰 patch 進 `tauri.conf.json`（記得 commit）。
+
+- Windows（PowerShell 7）：`pwsh -File scripts/setup-updater-signing.ps1`
+- macOS / Linux / Git Bash：`bash scripts/setup-updater-signing.sh`
+- 注意：在 PowerShell 直接打 `bash` 會進 WSL（那裡沒裝 pnpm），Windows 上請用 ps1 版。
 
 之後每次發版：
 
