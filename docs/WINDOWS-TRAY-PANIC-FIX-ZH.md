@@ -75,6 +75,43 @@ git diff -- src-tauri/Cargo.lock
 
 如果上述條件成立，就可以把本地分支往 upstream 更新，並用 upstream 來源加上當前版本 metadata 重新編譯。
 
+## 2026-08-22 追蹤：upstream v0.6.42 仍然閃退
+
+upstream 於 2026-08-21 發布 v0.6.42。實機安裝該版本後 app 再度無徵兆退出，
+且因為 upstream build 沒有本地的 crash 捕獲功能，`%APPDATA%` 下連 `logs`
+目錄都不存在，無法留下 panic 指紋。
+
+檢查 `v0.6.42` tag 的 `src-tauri/Cargo.lock` 確認：
+
+- `tray-icon` 仍鎖定 `0.21.1`（會觸發 panic 的版本）。
+- `tao` 仍為 `0.34.4`。
+- upstream 從未收錄 tray panic 相關修補。
+
+結論：v0.6.42 的閃退與原始 crash family 為同一根本原因，upstream 只是把
+未修補的依賴重新發布了一次。
+
+### 本地處理（分支 `fix/upstream-0.6.42-tray-panic`）
+
+- 將 upstream `v0.6.42` 合併進本地分支，保留 panic hook、crash.log、
+  View Logs 選單與 no-panic 錯誤處理。
+- `Cargo.lock` 重新鎖定 `tray-icon 0.21.3`。
+- 版本 metadata 同步為 `0.6.42`。
+- 同時收下 upstream 的重要修補：WebView2 開機前檢查對話框（另一種
+  閃退成因）、updater loop 改用 `tokio::time::sleep`（修 UI 凍結）、
+  OCR Result 化錯誤傳播、本地 TTS（sherpa-onnx）。
+
+### 新的建置需求（v0.6.42 起）
+
+- `sherpa-onnx` 只提供 MSVC 格式靜態庫（`win-x64-static-MT-Release`），
+  **GNU/MinGW toolchain 無法連結**。本機已對專案目錄執行
+  `rustup override set stable-x86_64-pc-windows-msvc`（機器層級設定，
+  不進 repo）。換機器建置時需要重新設定一次。
+- `make build-browser-extension` 相依 `change-package-version`，會把
+  `package.json` 版本 sed 成 `VERSION`（預設 `0.1.0`）。本地建置擴充
+  套件時要帶 `VERSION=<目前版本>`，或建置後把版本改回來。
+- Git Bash 沒有 `zip`，Makefile 最後的打包步驟會失敗；
+  `dist/browser-extension/chromium` 本體仍會產出，e2e 測試不受影響。
+
 ## OpenSpec 後續狀態
 
 OpenSpec change `fix-windows-tray-panic` 目前保留兩個條件式後續任務：
