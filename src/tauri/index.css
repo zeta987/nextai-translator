@@ -1,9 +1,10 @@
-html, body {
+html,
+body {
     margin: 0px;
     padding: 0px;
     overscroll-behavior: none;
     scrollbar-width: thin;
-    scrollbar-color: rgba(0,0,0,0.15) transparent;
+    scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
     -ms-overflow-style: none;
     -ms-user-select: none;
     -webkit-user-select: none;
@@ -74,13 +75,16 @@ textarea::-webkit-scrollbar-thumb:hover {
     background-color: rgba(0, 0, 0, 0.22);
 }
 
-*, a, button {
+*,
+a,
+button {
     -ms-user-select: none;
     -webkit-user-select: none;
     user-select: none;
 }
 
-input, textarea {
+input,
+textarea {
     -webkit-user-select: text;
 }
 
@@ -92,7 +96,8 @@ input, textarea {
 }
 
 /* Smooth transitions for interactive elements */
-button, [role="button"] {
+button,
+[role='button'] {
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
