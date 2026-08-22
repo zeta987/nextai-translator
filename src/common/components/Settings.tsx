@@ -2378,7 +2378,7 @@ export function InnerSettings({
                         NextAI Translator
                         {AppConfig?.version ? (
                             <a
-                                href='https://github.com/nextai-translator/nextai-translator/releases'
+                                href='https://github.com/zeta987/nextai-translator/releases'
                                 target='_blank'
                                 rel='noreferrer'
                                 style={linkStyle}
