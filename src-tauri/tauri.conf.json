@@ -15,7 +15,7 @@
     },
     "updater": {
       "endpoints": [
-        "https://github.com/nextai-translator/nextai-translator/releases/latest/download/latest.json"
+        "https://github.com/zeta987/nextai-translator/releases/latest/download/latest.json"
       ],
       "active": true,
       "windows": {
