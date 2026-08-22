@@ -185,6 +185,10 @@ finish() {
 
 TOTAL_STAGES=4
 
+# This clone has two remotes (origin + upstream); pin every gh call to the
+# fork so secrets never land on the wrong repository.
+export GH_REPO="zeta987/nextai-translator"
+
 KEY_FILE="${HOME}/.tauri/nextai-translator-fork.key"
 PUB_FILE="${KEY_FILE}.pub"
 CONF_FILE="src-tauri/tauri.conf.json"

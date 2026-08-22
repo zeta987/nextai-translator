@@ -7,6 +7,10 @@
 
 $ErrorActionPreference = 'Stop'
 
+# This clone has two remotes (origin + upstream); pin every gh call to the
+# fork so secrets never land on the wrong repository.
+$env:GH_REPO = 'zeta987/nextai-translator'
+
 $KeyFile  = Join-Path $env:USERPROFILE '.tauri\nextai-translator-fork.key'
 $PubFile  = "$KeyFile.pub"
 $ConfFile = 'src-tauri/tauri.conf.json'
