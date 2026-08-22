@@ -24,3 +24,17 @@ Follow the lightweight conventional pattern seen in history (`fix:`, `feat:`, `c
 
 ## Security & Configuration Tips
 Never commit API keys or user artifacts; rely on runtime configuration via the in-app settings or local `.env` files ignored by git. When adding providers, document required environment keys under `docs/` and guard sensitive defaults behind toggles in `src/common`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as GitHub issues on the fork `zeta987/nextai-translator` — never on upstream `nextai-translator/nextai-translator` unless the user explicitly says so. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: `CONTEXT.md` at the repo root plus `docs/adr/` for decisions. See `docs/agents/domain.md`.
