@@ -9,17 +9,18 @@
     "updater",
     "thumb",
     "screenshot",
-    "history"
+    "history",
+    "inline_lookup"
   ],
   "permissions": [
     {
       "identifier": "http:default",
       "allow": [
         {
-          "url": "https://*"
+          "url": "https://*:*"
         },
         {
-          "url": "http://*"
+          "url": "http://*:*"
         }
       ]
     },
@@ -93,6 +94,7 @@
     "core:window:allow-set-visible-on-all-workspaces",
     "core:window:allow-show",
     "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
     "core:window:allow-theme",
     "core:window:allow-title",
     "core:window:allow-toggle-maximize",

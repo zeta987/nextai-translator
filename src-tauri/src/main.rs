@@ -3,12 +3,14 @@
     windows_subsystem = "windows"
 )]
 
+mod ax_context;
 mod config;
 mod fetch;
 mod insertion;
 mod lang;
 mod ocr;
 mod tray;
+mod tts;
 mod utils;
 mod windows;
 mod writing;
@@ -32,14 +34,19 @@ use tauri_specta::Event;
 use tray::{PinnedFromTrayEvent, PinnedFromWindowEvent};
 use windows::{get_translator_window, CheckUpdateEvent, CheckUpdateResultEvent};
 
+use crate::ax_context::{read_ax_context_narrow, read_ax_context_wide};
 use crate::config::{clear_config_cache, get_config_content, ConfigUpdatedEvent};
 use crate::fetch::fetch_stream;
 use crate::lang::detect_lang;
 use crate::ocr::{cut_image, finish_ocr, screenshot, start_ocr};
+use crate::tts::synthesize_local_tts;
 use crate::windows::{
-    get_translator_window_always_on_top, hide_translator_window, show_action_manager_window,
-    show_history_window, show_translator_window_command,
-    show_translator_window_with_selected_text_command, show_updater_window, TRANSLATOR_WIN_NAME,
+    get_translator_window_always_on_top, get_writing_indicator_pending_lang,
+    hide_inline_lookup_window, hide_quick_translator_window, hide_translator_window,
+    hide_writing_indicator, recover_webview_visibility, show_action_manager_window,
+    show_history_window, show_inline_lookup_window_command, show_quick_translator_window_command,
+    show_translator_window_command, show_translator_window_with_selected_text_command,
+    show_updater_window, show_writing_indicator, TRANSLATOR_WIN_NAME,
 };
 use crate::writing::{finish_writing, write_to_input, writing_command};
 
@@ -47,7 +54,7 @@ use mouce::{Mouse, MouseActions};
 use once_cell::sync::OnceCell;
 #[cfg(debug_assertions)]
 use specta_typescript::{formatter::prettier, Typescript};
-use tauri::{AppHandle, LogicalPosition, LogicalSize};
+use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize};
 use tauri::{Manager, PhysicalPosition, PhysicalSize};
 use tauri_plugin_notification::NotificationExt;
 use tiny_http::{Response as HttpResponse, Server};
@@ -73,6 +80,11 @@ pub struct UpdateResult {
 }
 
 pub static UPDATE_RESULT: Mutex<Option<Option<UpdateResult>>> = Mutex::new(None);
+
+fn set_update_result(app: &AppHandle, update_result: Option<UpdateResult>) {
+    *UPDATE_RESULT.lock() = Some(update_result.clone());
+    let _ = app.emit("update-status-changed", update_result);
+}
 
 /// Set up a global panic hook that writes crash details to a file before the
 /// process terminates. This captures panics from ALL threads, not just main.
@@ -172,8 +184,7 @@ fn get_crash_log_path() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
         if let Ok(appdata) = std::env::var("APPDATA") {
-            let dir =
-                std::path::PathBuf::from(appdata).join("xyz.yetone.apps.openai-translator");
+            let dir = std::path::PathBuf::from(appdata).join("xyz.yetone.apps.openai-translator");
             let _ = std::fs::create_dir_all(&dir);
             return Some(dir.join("crash.log"));
         }
@@ -238,13 +249,23 @@ fn launch_ipc_server(server: &Server) {
             error!("IPC server: failed to read request body: {:?}", e);
             continue;
         }
-        utils::send_text(selected_text);
-        remember_active_window();
-        let window = windows::show_translator_window(false, true, false);
-        if let Err(e) = window.set_focus() {
-            warn!("IPC server: failed to set window focus: {:?}", e);
+        let use_compact = config::get_config()
+            .ok()
+            .and_then(|c| c.use_compact_lookup)
+            .unwrap_or(false);
+        if use_compact {
+            let window = windows::show_inline_lookup_window(false, true, false);
+            utils::send_text(selected_text);
+            let _ = window.set_focus();
+        } else {
+            utils::send_text(selected_text);
+            remember_active_window();
+            let window = windows::show_translator_window(false, true, false);
+            if let Err(e) = window.set_focus() {
+                warn!("IPC server: failed to set window focus: {:?}", e);
+            }
+            utils::show();
         }
-        utils::show();
         let response = HttpResponse::from_string("ok");
         if let Err(e) = req.respond(response) {
             warn!("IPC server: failed to send response: {:?}", e);
@@ -266,157 +287,165 @@ fn bind_mouse_hook() {
 
     let mut mouse_manager = Mouse::new();
 
-    let hook_result = mouse_manager.hook(Box::new(|event| {
-        match event {
-            mouce::common::MouseEvent::Press(mouce::common::MouseButton::Left) => {
-                let config = match config::get_config() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!("Mouse press: failed to get config: {:?}", e);
-                        return;
-                    }
-                };
-                let always_show_icons = config.always_show_icons.unwrap_or(true);
-                if !always_show_icons {
+    let hook_result = mouse_manager.hook(Box::new(|event| match event {
+        mouce::common::MouseEvent::Press(mouce::common::MouseButton::Left) => {
+            let config = match config::get_config() {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Mouse press: failed to get config: {:?}", e);
                     return;
                 }
-                let current_press_time = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis();
-                *PREVIOUS_PRESS_TIME.lock() = current_press_time;
+            };
+            let always_show_icons = config.always_show_icons.unwrap_or(true);
+            if !always_show_icons {
+                return;
             }
-            mouce::common::MouseEvent::Release(mouce::common::MouseButton::Left) => {
-                let config = match config::get_config() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!("Mouse release: failed to get config: {:?}", e);
-                        return;
-                    }
-                };
-                let always_show_icons = config.always_show_icons.unwrap_or(true);
-                if !always_show_icons {
-                    windows::delete_thumb();
+            let current_press_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            *PREVIOUS_PRESS_TIME.lock() = current_press_time;
+        }
+        mouce::common::MouseEvent::Release(mouce::common::MouseButton::Left) => {
+            let config = match config::get_config() {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Mouse release: failed to get config: {:?}", e);
                     return;
                 }
-                let current_release_time = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis();
-                let mut is_text_selected_event = false;
-                let (x, y): (i32, i32) = match windows::get_mouse_location() {
-                    Ok(pos) => pos,
-                    Err(e) => {
-                        warn!("Mouse release: failed to get mouse location: {:?}", e);
-                        return;
-                    }
-                };
-                let (prev_release_x, prev_release_y) = { *PREVIOUS_RELEASE_POSITION.lock() };
-                {
-                    *PREVIOUS_RELEASE_POSITION.lock() = (x, y);
+            };
+            let always_show_icons = config.always_show_icons.unwrap_or(true);
+            if !always_show_icons {
+                windows::delete_thumb();
+                return;
+            }
+            let current_release_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            let mut is_text_selected_event = false;
+            let (x, y): (i32, i32) = match windows::get_mouse_location() {
+                Ok(pos) => pos,
+                Err(e) => {
+                    warn!("Mouse release: failed to get mouse location: {:?}", e);
+                    return;
                 }
-                let mouse_distance =
-                    (((x - prev_release_x).pow(2) + (y - prev_release_y).pow(2)) as f64).sqrt();
-                let previous_press_time: u128;
-                let previous_release_time: u128;
-                {
-                    let previous_press_time_lock = PREVIOUS_PRESS_TIME.lock();
-                    let mut previous_release_time_lock = PREVIOUS_RELEASE_TIME.lock();
-                    previous_release_time = *previous_release_time_lock;
-                    *previous_release_time_lock = current_release_time;
-                    previous_press_time = *previous_press_time_lock;
-                }
-                let is_pressed = previous_release_time < previous_press_time;
-                let pressed_time = current_release_time - previous_press_time;
-                let is_double_click =
-                    current_release_time - previous_release_time < 700 && mouse_distance < 10.0;
-                if is_pressed && pressed_time > 300 && mouse_distance > 20.0 {
-                    is_text_selected_event = true;
-                }
-                if previous_release_time != 0 && is_double_click {
-                    is_text_selected_event = true;
-                }
-                let is_click_on_thumb = match APP_HANDLE.get() {
-                    Some(handle) => match handle.get_webview_window(windows::THUMB_WIN_NAME) {
-                        Some(window) => match window.outer_position() {
-                            Ok(position) => {
-                                let scale_factor = window.scale_factor().unwrap_or(1.0);
-                                if let Ok(size) = window.outer_size() {
-                                    if cfg!(target_os = "macos") {
-                                        let LogicalPosition { x: x1, y: y1 } =
-                                            position.to_logical::<i32>(scale_factor);
-                                        let LogicalSize {
-                                            width: mut w,
-                                            height: mut h,
-                                        } = size.to_logical::<i32>(scale_factor);
-                                        if cfg!(target_os = "windows") {
-                                            w = (20.0 as f64 * scale_factor) as i32;
-                                            h = (20.0 as f64 * scale_factor) as i32;
-                                        }
-                                        let (x2, y2) = (x1 + w, y1 + h);
-                                        let res = x >= x1 && x <= x2 && y >= y1 && y <= y2;
-                                        res
-                                    } else {
-                                        let PhysicalPosition { x: x1, y: y1 } = position;
-                                        let PhysicalSize {
-                                            width: mut w,
-                                            height: mut h,
-                                        } = size;
-                                        if cfg!(target_os = "windows") {
-                                            w = (20.0 as f64 * scale_factor) as u32;
-                                            h = (20.0 as f64 * scale_factor) as u32;
-                                        }
-                                        let (x2, y2) = (x1 + w as i32, y1 + h as i32);
-                                        let res = x >= x1 && x <= x2 && y >= y1 && y <= y2;
-                                        res
+            };
+            let (prev_release_x, prev_release_y) = { *PREVIOUS_RELEASE_POSITION.lock() };
+            {
+                *PREVIOUS_RELEASE_POSITION.lock() = (x, y);
+            }
+            let mouse_distance =
+                (((x - prev_release_x).pow(2) + (y - prev_release_y).pow(2)) as f64).sqrt();
+            let previous_press_time: u128;
+            let previous_release_time: u128;
+            {
+                let previous_press_time_lock = PREVIOUS_PRESS_TIME.lock();
+                let mut previous_release_time_lock = PREVIOUS_RELEASE_TIME.lock();
+                previous_release_time = *previous_release_time_lock;
+                *previous_release_time_lock = current_release_time;
+                previous_press_time = *previous_press_time_lock;
+            }
+            let is_pressed = previous_release_time < previous_press_time;
+            let pressed_time = current_release_time - previous_press_time;
+            let is_double_click =
+                current_release_time - previous_release_time < 700 && mouse_distance < 10.0;
+            if is_pressed && pressed_time > 300 && mouse_distance > 20.0 {
+                is_text_selected_event = true;
+            }
+            if previous_release_time != 0 && is_double_click {
+                is_text_selected_event = true;
+            }
+            let is_click_on_thumb = match APP_HANDLE.get() {
+                Some(handle) => match handle.get_webview_window(windows::THUMB_WIN_NAME) {
+                    Some(window) => match window.outer_position() {
+                        Ok(position) => {
+                            let scale_factor = window.scale_factor().unwrap_or(1.0);
+                            if let Ok(size) = window.outer_size() {
+                                if cfg!(target_os = "macos") {
+                                    let LogicalPosition { x: x1, y: y1 } =
+                                        position.to_logical::<i32>(scale_factor);
+                                    let LogicalSize {
+                                        width: mut w,
+                                        height: mut h,
+                                    } = size.to_logical::<i32>(scale_factor);
+                                    if cfg!(target_os = "windows") {
+                                        w = (20.0 as f64 * scale_factor) as i32;
+                                        h = (20.0 as f64 * scale_factor) as i32;
                                     }
+                                    let (x2, y2) = (x1 + w, y1 + h);
+                                    let res = x >= x1 && x <= x2 && y >= y1 && y <= y2;
+                                    res
                                 } else {
-                                    false
+                                    let PhysicalPosition { x: x1, y: y1 } = position;
+                                    let PhysicalSize {
+                                        width: mut w,
+                                        height: mut h,
+                                    } = size;
+                                    if cfg!(target_os = "windows") {
+                                        w = (20.0 as f64 * scale_factor) as u32;
+                                        h = (20.0 as f64 * scale_factor) as u32;
+                                    }
+                                    let (x2, y2) = (x1 + w as i32, y1 + h as i32);
+                                    let res = x >= x1 && x <= x2 && y >= y1 && y <= y2;
+                                    res
                                 }
-                            }
-                            Err(err) => {
-                                debug!("Thumb window position error: {:?}", err);
+                            } else {
                                 false
                             }
-                        },
-                        None => false,
+                        }
+                        Err(err) => {
+                            debug!("Thumb window position error: {:?}", err);
+                            false
+                        }
                     },
                     None => false,
-                };
-                if !is_text_selected_event && !is_click_on_thumb {
-                    windows::close_thumb();
+                },
+                None => false,
+            };
+            if !is_text_selected_event && !is_click_on_thumb {
+                windows::close_thumb();
+                return;
+            }
+
+            if !is_click_on_thumb {
+                if RELEASE_THREAD_ID.is_locked() {
                     return;
                 }
-
-                if !is_click_on_thumb {
-                    if RELEASE_THREAD_ID.is_locked() {
-                        return;
-                    }
-                    std::thread::spawn(move || {
-                        #[cfg(target_os = "macos")]
-                        {
-                            if !utils::is_valid_selected_frame().unwrap_or(false) {
-                                debug!("No valid selected frame");
-                                windows::close_thumb();
-                                return;
-                            }
-                        }
-
-                        let _lock = RELEASE_THREAD_ID.lock();
-                        let selected_text = get_selected_text().unwrap_or_default();
-                        if !selected_text.is_empty() {
-                            {
-                                *SELECTED_TEXT.lock() = selected_text;
-                            }
-                            windows::show_thumb(x, y);
-                        } else {
+                std::thread::spawn(move || {
+                    #[cfg(target_os = "macos")]
+                    {
+                        if !utils::is_valid_selected_frame().unwrap_or(false) {
+                            debug!("No valid selected frame");
                             windows::close_thumb();
+                            return;
                         }
-                    });
-                } else {
-                    windows::close_thumb();
-                    let selected_text = (*SELECTED_TEXT.lock()).to_string();
+                    }
+
+                    let _lock = RELEASE_THREAD_ID.lock();
+                    let selected_text = get_selected_text().unwrap_or_default();
                     if !selected_text.is_empty() {
+                        {
+                            *SELECTED_TEXT.lock() = selected_text;
+                        }
+                        windows::show_thumb(x, y);
+                    } else {
+                        windows::close_thumb();
+                    }
+                });
+            } else {
+                windows::close_thumb();
+                let selected_text = (*SELECTED_TEXT.lock()).to_string();
+                if !selected_text.is_empty() {
+                    let use_compact = config::get_config()
+                        .ok()
+                        .and_then(|c| c.use_compact_lookup)
+                        .unwrap_or(false);
+                    if use_compact {
+                        let window = windows::show_inline_lookup_window(false, true, false);
+                        utils::send_text(selected_text);
+                        let _ = window.set_focus();
+                    } else {
                         remember_active_window();
                         let window = windows::show_translator_window(false, true, false);
                         utils::send_text(selected_text);
@@ -426,8 +455,8 @@ fn bind_mouse_hook() {
                     }
                 }
             }
-            _ => {}
         }
+        _ => {}
     }));
 
     match hook_result {
@@ -442,6 +471,15 @@ fn bind_mouse_hook() {
 
 fn main() {
     setup_panic_hook();
+    // Without a working WebView2 Runtime not a single window can be created,
+    // so the app would only ever flash a frame and abort (discussion #1907).
+    // Fail up front with an actionable dialog instead.
+    #[cfg(target_os = "windows")]
+    if let Err(err) = tauri::webview_version() {
+        crate::windows::show_webview2_broken_dialog(&err.to_string());
+        std::process::exit(1);
+    }
+
     let _ = init_tokio_runtime();
     let silently = env::args().any(|arg| arg == "--silently");
 
@@ -461,19 +499,31 @@ fn main() {
             show_translator_window_with_selected_text_command,
             show_action_manager_window,
             show_history_window,
+            show_updater_window,
             get_translator_window_always_on_top,
             fetch_stream,
             writing_command,
             write_to_input,
             finish_writing,
+            show_writing_indicator,
+            hide_writing_indicator,
+            get_writing_indicator_pending_lang,
             insert_translation_into_previous_input,
             remember_active_window_command,
             detect_lang,
             screenshot,
             hide_translator_window,
+            hide_inline_lookup_window,
+            show_inline_lookup_window_command,
+            show_quick_translator_window_command,
+            hide_quick_translator_window,
+            read_ax_context_narrow,
+            read_ax_context_wide,
             start_ocr,
             finish_ocr,
             cut_image,
+            synthesize_local_tts,
+            recover_webview_visibility,
         ])
         .events(tauri_specta::collect_events![
             CheckUpdateEvent,
@@ -498,9 +548,7 @@ fn main() {
 
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut app = tauri::Builder::default()
-        .plugin(
-            tauri_plugin_aptabase::Builder::new("A-US-9856842764").build(),
-        )
+        .plugin(tauri_plugin_aptabase::Builder::new("A-US-9856842764").build())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([
@@ -551,6 +599,23 @@ fn main() {
             app_handle.plugin(tauri_plugin_updater::Builder::new().build())?;
             // create thumb window
             let _ = windows::get_thumb_window(0, 0);
+            // Pre-create the Quick Translator and writing-indicator panels —
+            // but ONLY on macOS. There the raw cocoa msg_send calls (setLevel:,
+            // etc.) must run on the AppKit main thread; if we let creation
+            // happen lazily inside an async Tauri command (which runs on a
+            // tokio worker thread), macOS aborts the process with
+            // "Must only be used from the main thread" / EXC_BREAKPOINT.
+            //
+            // On Windows neither constraint applies, and pre-creating these
+            // hidden transparent WebView2 windows kept their renderers
+            // compositing at full frame rate from launch, burning CPU while
+            // the app idled in the tray (#1883, #1886). They are created
+            // lazily on first use instead.
+            #[cfg(target_os = "macos")]
+            {
+                let _ = windows::get_quick_translator_window();
+                let _ = windows::get_writing_indicator_window();
+            }
             if silently {
                 // create translator window
                 let _ = get_translator_window(false, false, false);
@@ -611,7 +676,12 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    std::thread::sleep(std::time::Duration::from_secs(60 * 10));
+                    // MUST be the async sleep: std::thread::sleep here parks a
+                    // tokio runtime worker for 10 minutes, and with enough
+                    // concurrently blocked workers every tauri command (all
+                    // webview IPC) hangs - the app looks frozen while the UI
+                    // process is perfectly healthy.
+                    tokio::time::sleep(std::time::Duration::from_secs(60 * 10)).await;
                     info!("Running periodic update check");
                     let builder = handle.updater_builder();
                     let updater = match builder.build() {
@@ -625,25 +695,25 @@ fn main() {
                     match updater.check().await {
                         Ok(Some(update)) => {
                             info!("Update available: v{}", update.version);
-                            *UPDATE_RESULT.lock() = Some(Some(UpdateResult {
-                                version: update.version,
-                                current_version: update.current_version,
-                                body: update.body,
-                            }));
+                            set_update_result(
+                                &handle,
+                                Some(UpdateResult {
+                                    version: update.version,
+                                    current_version: update.current_version,
+                                    body: update.body,
+                                }),
+                            );
                             if let Err(e) = tray::create_tray(&handle) {
                                 error!("Failed to update tray after update check: {:?}", e);
                             }
                         }
                         Ok(None) => {
-                            if UPDATE_RESULT.lock().is_some() {
-                                if let Some(Some(_)) = *UPDATE_RESULT.lock() {
-                                    *UPDATE_RESULT.lock() = Some(None);
-                                    if let Err(e) = tray::create_tray(&handle) {
-                                        error!("Failed to update tray: {:?}", e);
-                                    }
+                            let had_update = matches!(*UPDATE_RESULT.lock(), Some(Some(_)));
+                            set_update_result(&handle, None);
+                            if had_update {
+                                if let Err(e) = tray::create_tray(&handle) {
+                                    error!("Failed to update tray: {:?}", e);
                                 }
-                            } else {
-                                *UPDATE_RESULT.lock() = Some(None);
                             }
                         }
                         Err(e) => {
@@ -677,7 +747,7 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     {
-        let config = config::get_config_by_app(app.handle()).unwrap();
+        let config = config::get_config_by_app(app.handle()).unwrap_or_default();
         if config.hide_the_icon_in_the_dock.unwrap_or(true) {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
         } else {
@@ -710,11 +780,14 @@ fn main() {
                 match updater.check().await {
                     Ok(Some(update)) => {
                         info!("Update available on startup: v{}", update.version);
-                        *UPDATE_RESULT.lock() = Some(Some(UpdateResult {
-                            version: update.version,
-                            current_version: update.current_version,
-                            body: update.body,
-                        }));
+                        set_update_result(
+                            &handle,
+                            Some(UpdateResult {
+                                version: update.version,
+                                current_version: update.current_version,
+                                body: update.body,
+                            }),
+                        );
                         if let Err(e) = tray::create_tray(&handle) {
                             error!("Failed to update tray on startup: {:?}", e);
                         }
@@ -730,20 +803,17 @@ fn main() {
                                 .automatic_check_for_updates
                                 .is_some_and(|x| x == true)
                         {
-                            std::thread::sleep(std::time::Duration::from_secs(3));
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                             show_updater_window();
                         }
                     }
                     Ok(None) => {
-                        if UPDATE_RESULT.lock().is_some() {
-                            if let Some(Some(_)) = *UPDATE_RESULT.lock() {
-                                *UPDATE_RESULT.lock() = Some(None);
-                                if let Err(e) = tray::create_tray(&handle) {
-                                    error!("Failed to update tray on startup: {:?}", e);
-                                }
+                        let had_update = matches!(*UPDATE_RESULT.lock(), Some(Some(_)));
+                        set_update_result(&handle, None);
+                        if had_update {
+                            if let Err(e) = tray::create_tray(&handle) {
+                                error!("Failed to update tray on startup: {:?}", e);
                             }
-                        } else {
-                            *UPDATE_RESULT.lock() = Some(None);
                         }
                     }
                     Err(e) => {

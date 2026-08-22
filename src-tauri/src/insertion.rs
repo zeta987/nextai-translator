@@ -2,8 +2,8 @@ use std::thread;
 use std::time::Duration;
 
 use active_win_pos_rs::{get_active_window, ActiveWindow};
-use log::debug;
 use enigo::{Enigo, Keyboard, Settings};
+use log::debug;
 use parking_lot::Mutex;
 
 use crate::utils::INPUT_LOCK;
@@ -79,8 +79,7 @@ fn focus_window(window: &ActiveWindow) -> Result<(), String> {
         } else {
             debug!(
                 "[insertion] NSRunningApplication not found for pid {} ({})",
-                window.process_id,
-                window.app_name
+                window.process_id, window.app_name
             );
         }
     }

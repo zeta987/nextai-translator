@@ -178,6 +178,16 @@ export abstract class AbstractOpenAI extends AbstractEngine {
         return { model, stream: true }
     }
 
+    // Whether `reasoning_effort: 'none'` may be sent for the given model to disable thinking.
+    // `none` is only a valid value for OpenAI's GPT-5.1+ reasoning models, and strict providers
+    // (e.g. DeepSeek) reject it outright (#1879), so the conservative default only allows it for
+    // GPT-5.1+. AbstractOpenAI is the shared base class for many OpenAI-compatible providers;
+    // lenient or local servers that tolerate the param for any model and honor it for hybrid
+    // reasoning models (e.g. Ollama / LM Studio with Qwen3) override this to return true (#1881).
+    protected supportsReasoningEffortNone(model: string): boolean {
+        return /^gpt-5\.[1-9]/.test(model.toLowerCase())
+    }
+
     async sendMessage(req: IMessageRequest): Promise<void> {
         const apiURL = await this.getAPIURL()
         const apiURLPath = await this.getAPIURLPath()
@@ -188,6 +198,10 @@ export abstract class AbstractOpenAI extends AbstractEngine {
         const headers = await this.getHeaders()
         const isChatAPI = await this.isChatAPI()
         const body = await this.getBaseRequestBody(model)
+        const settings = await getSettings()
+        if (!settings.thinkingEnabled && this.supportsReasoningEffortNone(model)) {
+            body['reasoning_effort'] = 'none'
+        }
         if (useResponsesAPI) {
             if (body.reasoning_effort !== undefined) {
                 body['reasoning'] = {

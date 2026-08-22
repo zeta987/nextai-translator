@@ -68,6 +68,7 @@ const settingKeys: Record<keyof ISettings, number> = {
     hotkey: 1,
     displayWindowHotkey: 1,
     ocrHotkey: 1,
+    quickTranslatorHotkey: 1,
     writingTargetLanguage: 1,
     writingHotkey: 1,
     writingNewlineHotkey: 1,
@@ -91,6 +92,7 @@ const settingKeys: Record<keyof ISettings, number> = {
     ollamaAPIModel: 1,
     ollamaCustomModelName: 1,
     ollamaModelLifetimeInMemory: 1,
+    thinkingEnabled: 1,
     groqAPIURL: 1,
     groqAPIURLPath: 1,
     groqAPIModel: 1,
@@ -111,12 +113,20 @@ const settingKeys: Record<keyof ISettings, number> = {
     deepSeekAPIModel: 1,
     cerebrasAPIKey: 1,
     cerebrasAPIModel: 1,
+    teamoRouterAPIKey: 1,
+    teamoRouterAPIModel: 1,
+    openRouterAPIKey: 1,
+    openRouterAPIModel: 1,
+    liteLLMAPIURL: 1,
+    liteLLMAPIKey: 1,
+    liteLLMAPIModel: 1,
     fontSize: 1,
     uiFontSize: 1,
     iconSize: 1,
     noModelsAPISupport: 1,
     claudeThinking: 1,
     claudeThinkingLevel: 1,
+    useCompactLookup: 1,
 }
 
 export async function getSettings(): Promise<ISettings> {
@@ -172,6 +182,11 @@ export async function getSettings(): Promise<ISettings> {
     if (!settings.themeType) {
         settings.themeType = 'followTheSystem'
     }
+    if (settings.tts?.provider === 'EdgeTTS') {
+        // The Edge TTS public endpoint no longer works, so route users who
+        // had selected it onto the local engine.
+        settings.tts = { ...settings.tts, provider: 'LocalTTS' }
+    }
     if (settings.provider === 'Azure') {
         if (!settings.azureAPIKeys) {
             settings.azureAPIKeys = settings.apiKeys
@@ -221,13 +236,16 @@ export async function getSettings(): Promise<ISettings> {
         settings.ollamaAPIURL = 'http://127.0.0.1:11434'
     }
     if (!settings.miniMaxAPIModel) {
-        settings.miniMaxAPIModel = 'MiniMax-M2.5'
+        settings.miniMaxAPIModel = 'MiniMax-M2.7'
     }
     if (!settings.groqAPIURL) {
         settings.groqAPIURL = 'https://api.groq.com'
     }
     if (!settings.groqAPIURLPath) {
         settings.groqAPIURLPath = '/openai/v1/chat/completions'
+    }
+    if (!settings.liteLLMAPIURL) {
+        settings.liteLLMAPIURL = 'http://localhost:4000'
     }
     if (!settings.claudeAPIURL) {
         settings.claudeAPIURL = 'https://api.anthropic.com'
@@ -242,7 +260,7 @@ export async function getSettings(): Promise<ISettings> {
         settings.fontSize = 15
     }
     if (settings.uiFontSize === undefined || settings.uiFontSize === null) {
-        settings.uiFontSize = 12
+        settings.uiFontSize = 14
     }
     if (settings.iconSize === undefined || settings.iconSize === null) {
         settings.iconSize = 15
@@ -255,6 +273,9 @@ export async function getSettings(): Promise<ISettings> {
     }
     if (settings.ollamaModelLifetimeInMemory === undefined || settings.ollamaModelLifetimeInMemory === null) {
         settings.ollamaModelLifetimeInMemory = '5m'
+    }
+    if (settings.thinkingEnabled === undefined || settings.thinkingEnabled === null) {
+        settings.thinkingEnabled = false
     }
     return settings
 }
@@ -444,8 +465,23 @@ export async function fetchSSE(input: string, options: FetchSSEOptions) {
     if (isTauri()) {
         const id = uuidv4()
         const unlistens: Array<() => void> = []
+        let cleanedUp = false
         const unlisten = () => {
+            cleanedUp = true
             unlistens.forEach((cb) => cb())
+            unlistens.length = 0
+        }
+        // listen() registrations resolve asynchronously and can land AFTER
+        // cleanup already ran (fast failures, aborts) - such listeners used
+        // to leak forever, and every leaked listener is iterated on every
+        // stream chunk of every later request, grinding the whole app down
+        // the longer the session runs.
+        const track = (cb: () => void) => {
+            if (cleanedUp) {
+                cb()
+                return
+            }
+            unlistens.push(cb)
         }
         return await new Promise<void>((resolve, reject) => {
             let isAborted = false
@@ -463,7 +499,7 @@ export async function fetchSSE(input: string, options: FetchSSEOptions) {
                     onStatusCode?.(event.payload.status)
                 }
             })
-                .then((cb) => unlistens.push(cb))
+                .then(track)
                 .catch((e) => reject(e))
             listen(
                 'fetch-stream-chunk',
@@ -498,9 +534,7 @@ export async function fetchSSE(input: string, options: FetchSSEOptions) {
                     }
                 }
             )
-                .then((cb) => {
-                    unlistens.push(cb)
-                })
+                .then(track)
                 .catch((e) => {
                     reject(e)
                 })
@@ -511,11 +545,11 @@ export async function fetchSSE(input: string, options: FetchSSEOptions) {
                     reject(e)
                 })
                 .finally(() => {
-                    if (isAborted) {
-                        return
+                    // Aborted requests must clean up their listeners too.
+                    unlisten()
+                    if (!isAborted) {
+                        resolve()
                     }
-                    unlisten?.()
-                    resolve()
                 })
         })
     }
@@ -577,6 +611,12 @@ export function getAPIKeyForProvider(provider: string, settings: ISettings): str
             return settings.deepSeekAPIKey
         case 'Cerebras':
             return settings.cerebrasAPIKey
+        case 'TeamoRouter':
+            return settings.teamoRouterAPIKey
+        case 'OpenRouter':
+            return settings.openRouterAPIKey
+        case 'LiteLLM':
+            return settings.liteLLMAPIKey
         case 'Moonshot':
             return settings.moonshotAPIKey
         case 'MiniMax':
